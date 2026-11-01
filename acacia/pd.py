@@ -97,6 +97,9 @@ class Entity:
         self,
         mr: MemoryRegion,
         perms: Union[Map.Permissions, str],
+        setvar_vaddr: Optional[str] = None,
+        setvar_size: Optional[str] = None,
+        setvar_prefill_size: Optional[str] = None,
     ) -> Map:
         """
         Given a memory region, automatically create a map and assign it a vaddr
@@ -106,6 +109,9 @@ class Entity:
 
         :param mr: MemoryRegion to map
         :param perms: Map permissions - read, write, execute
+        :param setvar_vaddr: symbol to patch with the map's virtual address
+        :param setvar_size: symbol to patch with the size of `mr`
+        :param setvar_prefill_size: symbol to patch with the size of `mr`'s prefill data
         :returns: created map object.
 
         NOTE: This replaces `getMapVaddr` in zig sdfgen.
@@ -140,7 +146,14 @@ class Entity:
         else:
             next_vaddr = self.map_start_vaddr
 
-        m = Map(mr, next_vaddr, perms)
+        m = Map(
+            mr,
+            next_vaddr,
+            perms,
+            setvar_vaddr=setvar_vaddr,
+            setvar_size=setvar_size,
+            setvar_prefill_size=setvar_prefill_size,
+        )
         self.add_map(m)
         return m
 

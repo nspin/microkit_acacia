@@ -546,6 +546,14 @@ class TestCreateAutomap:
         assert m.vaddr == pd.map_start_vaddr
         assert m.vaddr % 0x1000 == 0
 
+    def test_setvars_passed_to_map(self, sdf):
+        pd = ProtectionDomain(sdf, "test", "test.elf", priority=100)
+        mr = MemoryRegion(sdf, "mr", 0x1000)
+        m = pd.create_automap(mr, "rw", setvar_vaddr="my_vaddr", setvar_size="my_size")
+        assert m.setvar_vaddr == "my_vaddr"
+        assert m.setvar_size == "my_size"
+        assert m.setvar_prefill_size is None
+
     def test_maps_are_page_aligned(self, sdf):
         pd = ProtectionDomain(sdf, "test", "test.elf", priority=100)
         # Odd-sized region still produces a page-aligned vaddr.
