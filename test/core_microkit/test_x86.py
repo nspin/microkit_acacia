@@ -120,3 +120,14 @@ class TestIOPort:
         assert iop_elem.get("id") == "3"
         assert iop_elem.get("addr") == "1016"
         assert iop_elem.get("size") == "8"
+        assert "setvar_id" not in iop_elem.attrib
+        assert "setvar_addr" not in iop_elem.attrib
+
+    def test_render_setvars(self):
+        ioport = IOPort(0x3F8, 0x8, setvar_id="my_id", setvar_addr="my_addr")
+        ioport.id = 3
+        parent = et.Element("parent")
+        ioport.render(parent)
+        iop_elem = parent.find("ioport")
+        assert iop_elem.get("setvar_id") == "my_id"
+        assert iop_elem.get("setvar_addr") == "my_addr"
