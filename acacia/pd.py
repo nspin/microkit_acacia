@@ -4,7 +4,7 @@
 from __future__ import annotations
 import xml.etree.ElementTree as et
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Set, Union
+from typing import List, Optional, Sequence, Set, Tuple, Union
 
 from .irq import IRQ
 from .memory import Map, MemoryRegion
@@ -287,6 +287,9 @@ class ProtectionDomain(Entity):
         self.child_id = None  # Assigned if this PD is made a child.
         self.child_setvar_id: Optional[str] = None
 
+        # (symbol, MemoryRegion) pairs for <setvar region_paddr=...>
+        self.paddr_setvars: List[Tuple[str, MemoryRegion]] = []
+
         # VM
         self.vms: List[VirtualMachine] = []
 
@@ -328,6 +331,10 @@ class ProtectionDomain(Entity):
         for vm in self.vms:
             vm.render(pd)
         self.cspace.render(pd)
+        for symbol, mr in self.paddr_setvars:
+            setvar = et.SubElement(pd, "setvar")
+            setvar.set("symbol", symbol)
+            setvar.set("region_paddr", mr.name)
 
         return pd
 
@@ -445,6 +452,15 @@ class ProtectionDomain(Entity):
             if len(self.vms) > 0:
                 raise ValueError("x86 systems do not support multiple VMs per PD!")
         self.vms.append(vm)
+
+    def add_paddr_setvar(self, symbol: str, mr: MemoryRegion):
+        """
+        Have Microkit patch the physical address of `mr` into the symbol `symbol` in this PD's
+        program image. `mr` must be physical.
+        """
+        if not mr.physical:
+            raise ValueError(f"{mr} is not physical!")
+        self.paddr_setvars.append((symbol, mr))
 
     def add_cap_map(self, cap_map: "CapMap"):
         self.cspace.add_cap_map(cap_map)

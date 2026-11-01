@@ -348,6 +348,26 @@ class TestChildPdIntegration:
         assert irq_elem.get("id") is not None
 
 
+class TestPaddrSetVar:
+    def test_render(self, sdf):
+        pd = ProtectionDomain(sdf, "pd", "pd.elf", priority=100)
+        mr = MemoryRegion(sdf, "dma", 0x1000, physical=True)
+        pd.add_paddr_setvar("dma_paddr", mr)
+
+        root = et.Element("system")
+        pd.render(root)
+
+        setvar = root.find("protection_domain").find("setvar")
+        assert setvar.get("symbol") == "dma_paddr"
+        assert setvar.get("region_paddr") == "dma"
+
+    def test_virtual_region_rejected(self, sdf):
+        pd = ProtectionDomain(sdf, "pd", "pd.elf", priority=100)
+        mr = MemoryRegion(sdf, "shared", 0x1000)
+        with pytest.raises(ValueError, match="not physical"):
+            pd.add_paddr_setvar("shared_paddr", mr)
+
+
 class TestVCPU:
     def test_valid_vcpu(self):
         v = VirtualMachine.VCPU(id=5, cpu=2)
