@@ -127,6 +127,20 @@ class TestChannel:
         pd1_end = next(e for e in ends if e.get("pd") == "pd1")
         assert pd1_end.get("notify") == "false"
 
+    def test_render_setvar_id(self, sdf):
+        pd1 = self.create_pd(sdf, "pd1", 100)
+        pd2 = self.create_pd(sdf, "pd2", 200)
+        end_a = Channel.End(pd=pd1, setvar_id="pd2_channel")
+        end_b = Channel.End(pd=pd2)
+        ch = Channel(sdf, end_a, end_b)
+        root = et.Element("system")
+        ch.render(root)
+        ends = root.find("channel").findall("end")
+        pd1_end = next(e for e in ends if e.get("pd") == "pd1")
+        pd2_end = next(e for e in ends if e.get("pd") == "pd2")
+        assert pd1_end.get("setvar_id") == "pd2_channel"
+        assert "setvar_id" not in pd2_end.attrib
+
 
 class TestChannelStateConstraints:
     def test_channel_creation_fails_after_final(self, sdf):
