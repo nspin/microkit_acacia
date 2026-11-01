@@ -258,6 +258,18 @@ class TestChildPdRendering:
         assert child_elem is not None
         assert child_elem.get("name") == "child"
         assert child_elem.get("id") == "2"
+        assert "setvar_id" not in child_elem.attrib
+
+    def test_child_setvar_id(self, sdf):
+        parent = ProtectionDomain(sdf, "parent", "parent.elf", priority=100)
+        child = ProtectionDomain(sdf, "child", "child.elf", priority=50)
+        parent.add_child_pd(child, child_id=2, setvar_id="child_id")
+
+        root = et.Element("system")
+        parent.render(root)
+
+        child_elem = root.find("protection_domain").find("protection_domain")
+        assert child_elem.get("setvar_id") == "child_id"
 
     def test_child_without_parent_no_id_attribute(self, sdf):
         child = ProtectionDomain(sdf, "child", "child.elf", priority=50)
@@ -353,6 +365,12 @@ class TestVCPU:
     def test_vcpu_id_exceeds_max(self):
         with pytest.raises(RuntimeError, match="VCPU ID.*is invalid"):
             VirtualMachine.VCPU(id=63)  # MAX_IDS is 62
+
+    def test_vcpu_render_setvar_id(self):
+        v = VirtualMachine.VCPU(id=4, setvar_id="vcpu_id")
+        parent = et.Element("parent")
+        v.render(parent)
+        assert parent.find("vcpu").get("setvar_id") == "vcpu_id"
 
     def test_vcpu_render(self):
         v = VirtualMachine.VCPU(id=4, cpu=1)

@@ -188,6 +188,7 @@ class VirtualMachine(Entity):
 
         id: int
         cpu: Optional[int] = None
+        setvar_id: Optional[str] = None
 
         def __post_init__(self):
             if self.id is None or self.id < 0 or self.id > MAX_IDS:
@@ -202,6 +203,8 @@ class VirtualMachine(Entity):
             entity.set("id", str(self.id))
             if self.cpu is not None:
                 entity.set("cpu", str(self.cpu))
+            if self.setvar_id is not None:
+                entity.set("setvar_id", self.setvar_id)
 
     def __init__(
         self,
@@ -282,6 +285,7 @@ class ProtectionDomain(Entity):
         # Parental responsibilities
         self.children: List[ProtectionDomain] = []
         self.child_id = None  # Assigned if this PD is made a child.
+        self.child_setvar_id: Optional[str] = None
 
         # VM
         self.vms: List[VirtualMachine] = []
@@ -304,6 +308,8 @@ class ProtectionDomain(Entity):
         if self.child_id is not None:
             # If we are a child, include id.
             pd.set("id", str(self.child_id))
+            if self.child_setvar_id is not None:
+                pd.set("setvar_id", self.child_setvar_id)
 
         # Only insert stack size, CPU and SMC if defined
         # QoL: render elements in name/val order
@@ -389,10 +395,15 @@ class ProtectionDomain(Entity):
         ioport.id = new_id
         self.ioports.append(ioport)
 
-    def add_child_pd(self, child, child_id: Optional[int] = None):
+    def add_child_pd(
+        self, child, child_id: Optional[int] = None, setvar_id: Optional[str] = None
+    ):
         """
         Mark a PD as a child of this PD. This will remove the PD from the top-level system and
         make it render as a child element of this PD's XML instead.
+
+        If `setvar_id` is given, Microkit will patch the child's ID into the symbol of that name
+        in this PD's program image.
         """
         if child in self.children:
             raise RuntimeError("Cannot make the same PD a child multiple times!")
@@ -412,6 +423,7 @@ class ProtectionDomain(Entity):
         # remove child from sdf.
         self.sdf.pds.remove(child)
         child.child_id = new_child_id
+        child.child_setvar_id = setvar_id
         self.children.append(child)
         return new_child_id
 
