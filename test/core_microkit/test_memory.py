@@ -129,6 +129,30 @@ class TestMap:
         map_elem = parent.find("map")
         assert map_elem.get("setvar_vaddr") == "my_vaddr"
 
+    def test_render_setvar_size(self, sdf):
+        mr = MemoryRegion(sdf, "test_mr", 0x1000)
+        m = Map(
+            mr,
+            0x40000000,
+            "rw",
+            setvar_size="my_size",
+            setvar_prefill_size="my_prefill_size",
+        )
+        parent = et.Element("parent")
+        m.render(parent)
+        map_elem = parent.find("map")
+        assert map_elem.get("setvar_size") == "my_size"
+        assert map_elem.get("setvar_prefill_size") == "my_prefill_size"
+
+    def test_render_no_setvars(self, sdf):
+        mr = MemoryRegion(sdf, "test_mr", 0x1000)
+        m = Map(mr, 0x40000000, "rw")
+        parent = et.Element("parent")
+        m.render(parent)
+        map_elem = parent.find("map")
+        for attr in ("setvar_vaddr", "setvar_size", "setvar_prefill_size"):
+            assert attr not in map_elem.attrib
+
 
 class TestIOMap:
     def test_unreadable_and_unwritable_rejected(self, sdf):
