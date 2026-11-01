@@ -51,6 +51,20 @@ class TestIrqIoapic:
         assert irq_elem.get("trigger") == "level"
 
 
+class TestIrqSetVarId:
+    def test_ioapic_render_setvar_id(self):
+        irq = IrqIoapic(0, 4, 36, id=1, setvar_id="my_irq")
+        parent = et.Element("parent")
+        irq.render(parent)
+        assert parent.find("irq").get("setvar_id") == "my_irq"
+
+    def test_msi_render_setvar_id(self):
+        irq = IrqMsi(0, 1, 0, 37, 0, id=2, setvar_id="my_irq")
+        parent = et.Element("parent")
+        irq.render(parent)
+        assert parent.find("irq").get("setvar_id") == "my_irq"
+
+
 class TestIrqMsi:
     def test_initialization(self):
         irq = IrqMsi(pci_bus=0, pci_device=3, pci_func=0, vector=64, handle=0)

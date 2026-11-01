@@ -37,6 +37,14 @@ class TestConventionalIRQ:
         irq.render(parent)
         irq_elem = parent.find("irq")
         assert irq_elem.get("trigger") == "level"
+        assert "setvar_id" not in irq_elem.attrib
+
+    def test_render_setvar_id(self):
+        irq = ConventionalIRQ(42, IRQ.Trigger.LEVEL, id=2, setvar_id="my_irq")
+        parent = et.Element("parent")
+        irq.render(parent)
+        irq_elem = parent.find("irq")
+        assert irq_elem.get("setvar_id") == "my_irq"
 
 
 class TestIRQTriggerEnum:
