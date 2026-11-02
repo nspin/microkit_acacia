@@ -31,7 +31,7 @@ python3Packages.buildPythonPackage {
 
   build-system = [ python3Packages.setuptools ];
   dependencies = [
-    python3Packages.lark
+    python3Packages.pyelftools
     libfdt
   ];
   pythonRelaxDeps = true;

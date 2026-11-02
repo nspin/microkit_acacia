@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import pathlib
-import subprocess
 from collections.abc import Iterable, Sized
 from ctypes import (
     c_bool,
@@ -23,569 +22,9 @@ from ctypes import (
     c_uint32,
     c_uint64,
 )
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional
 
-from lark import Lark, Token, Tree
-
-from .dwarf_dump_grammar import grammar
-
-
-class Attributes:
-    """
-    Class encapsulating tag attributes in the parsed output of llvm-dwarfdump on
-    a file. This is used internally by Acacia when discovering the layout of ConfigStructs
-    in compiled code.
-    Examples:
-
-        attribute
-            at_name	name
-            escaped_string	"i2c_cmd_t"
-
-         attribute
-           at_name	type
-           pair
-             number	0x000001a5
-             escaped_string	"i2c_cmd"
-
-    Sanity checks values for each attribute.
-    """
-
-    valid_attributes = (
-        "name",
-        "decl_file",
-        "encoding",
-        "byte_size",
-        "const_value",
-        "decl_line",
-        "decl_column",
-        "data_member_location",
-        "upper_bound",
-        "count",
-        "alignment",
-        "type",
-        "sibling",
-        "bit_size",
-        "data_bit_offset",
-        "declaration",
-    )
-
-    @staticmethod
-    def _get_single_child_token(value_tree: Tree, data: str) -> Token:
-        if value_tree.data != data:
-            raise ValueError(f"Expected {data}, found '{value_tree.pretty()}'")
-
-        assert len(value_tree.children) == 1
-        token = value_tree.children[0]
-        assert isinstance(token, Token)
-        return token
-
-    @staticmethod
-    def escaped_string(value_tree: Tree) -> str:
-        """
-        Returns the un-escaped string value from lark trees of the form:
-            escaped_string  "DW_ATE_unsigned_32"
-        """
-        str_tok = Attributes._get_single_child_token(value_tree, "escaped_string")
-        return str_tok.value[1:-1]
-
-    @staticmethod
-    def string(value_tree: Tree) -> str:
-        """
-        Returns the string value from lark trees of the form:
-            string	DW_ATE_unsigned
-        """
-        str_tok = Attributes._get_single_child_token(value_tree, "string")
-        return str_tok.value
-
-    @staticmethod
-    def number(value_tree: Tree) -> int:
-        """
-        Returns the numeric value from lark trees of the form:
-            number	0x04
-        """
-        str_val = Attributes._get_single_child_token(value_tree, "number").value
-        if str_val.startswith("0x"):
-            return int(str_val, base=16)
-        return int(str_val)
-
-    @staticmethod
-    def id_number(value_tree: Tree) -> int:
-        """
-        Returns the numeric value from lark trees of the form:
-            number	0x0000005b
-        """
-        str_val = Attributes._get_single_child_token(value_tree, "number").value
-        if not str_val.startswith("0x") or len(str_val) != 10:
-            raise ValueError(f"Expected type ID, found '{str_val}'")
-        return int(str_val, base=16)
-
-    @staticmethod
-    def pair(value_tree: Tree) -> Tuple[int, str]:
-        """
-        Returns a tuple of the numeric value and string from lark trees of the form:
-            pair
-                number	0x0000005b
-                escaped_string	"int"
-        """
-        if value_tree.data != "pair" or len(value_tree.children) != 2:
-            raise ValueError(f"Expected pair, found '{value_tree.pretty()}'")
-        number = Attributes.id_number(value_tree.children[0])
-        escaped_string = Attributes.escaped_string(value_tree.children[1])
-        return number, escaped_string
-
-    def extract_attribute(self, tree: Tree):
-        """
-        Given an attribute tree of the form:
-        ```text
-        attribute
-            at_name	name
-            escaped_string	"i2c_cmd_t"
-        ```
-        extract the value of the attribute.
-        """
-        if tree.data != "attribute":
-            raise ValueError(f"Expected attribute tree, found '{tree.pretty()}'")
-
-        assert isinstance(tree.children[0].children[0], Token)
-        at_name = tree.children[0].children[0].value
-        if at_name not in self.valid_attributes:
-            raise ValueError(
-                f"Found invalid attribute name '{at_name}' in attribute '{tree.pretty()}'"
-            )
-
-        setattr(self, at_name, tree.children[1])
-
-    def __getattr__(self, name: str):
-        if name in self.__dict__:
-            return self.__dict__[name]
-        elif name in self.valid_attributes:
-            return None
-        else:
-            raise AttributeError(f"Attributes class has no attribute '{name}'")
-
-    def __setattr__(self, name: str, value: Union[tuple, Tree]):
-        if name == "valid_attributes":
-            super().__setattr__(name, value)
-
-        assert isinstance(value, Tree)
-
-        if name in self.__dict__:
-            raise AttributeError(
-                f"Attempting to reset initialised attribute '{name}' from '{self.__dict__[name]}' to '{value.pretty()}'"
-            )
-
-        at_value: Union[str, int, Tuple[int, str]]
-        match name:
-            case at_name if at_name in ("name", "decl_file"):
-                at_value = self.escaped_string(value)
-            case at_name if at_name in ("encoding", "declaration"):
-                encoding = self.string(value)
-                # if not encoding.startswith("DW_ATE_"):
-                #     raise ValueError(
-                #         f"Found an encoding attribute '{encoding}' without the 'DW_ATE_' prefix"
-                #     )
-                at_value = encoding[7:]
-            case "byte_size":
-                at_value = self.number(value)
-                if at_value <= 0:
-                    raise ValueError(f"Found a non positive byte size '{at_value}'")
-            case "const_value":
-                at_value = self.number(value)
-            case "type":
-                at_value = self.pair(value)
-            case "sibling":
-                at_value = self.id_number(value)
-            case at_name if at_name in (
-                "decl_line",
-                "decl_column",
-                "data_member_location",
-                "upper_bound",
-                "count",
-                "alignment",
-                "bit_size",
-                "data_bit_offset",
-            ):
-                at_value = self.number(value)
-                if at_value < 0:
-                    raise ValueError(f"Found a negative {name} '{at_value}'")
-            case _:
-                raise AttributeError(f"Attributes class has no attribute '{name}'")
-
-        super().__setattr__(name, at_value)
-
-    def __eq__(self, other: object):
-        if not isinstance(other, Attributes):
-            return False
-        attribute: Attributes = other
-
-        for att in self.valid_attributes:
-            my_val = getattr(self, att)
-            other_val = getattr(attribute, att)
-            if att == "type":
-                # May be None for some objects.
-                if my_val == None and other_val == None:
-                    continue
-                elif None in [my_val, other_val]:
-                    # If one is None and the other isn't, these obviously aren't the same.
-                    # Handle this to guard indexing None below
-                    return False
-
-                # Ignore the base type ID value for the type attribute -
-                # differences in ID do not necessarily imply the underlying
-                # types with those IDs are different
-                if my_val[1] != other_val[1]:
-                    return False
-                continue
-
-            if my_val != other_val:
-                return False
-
-        return True
-
-    def __repr__(self):
-        return (
-            "Attributes:\n    "
-            + "\n    ".join(
-                [
-                    f"{at_name}: {getattr(self, at_name)}"
-                    for at_name in self.valid_attributes
-                ]
-            )
-            + "\n"
-        )
-
-
-class CType:
-    """
-    Class encapsulating a tag entry or C type found in the parsed output of
-    llvm-dwarfdump on a file. This is used internally by Acacia to represent types
-    found in a compiled file when determining how to pack ConfigStructs.
-    Examples:
-
-        unknown_tag
-            id	0000000c
-
-    or
-
-        base_tag
-          id	0000002b
-          attribute
-            at_name	name
-            escaped_string	"DW_ATE_unsigned_32"
-          attribute
-            at_name	encoding
-            string	DW_ATE_unsigned
-          attribute
-            at_name	byte_size
-            number	0x04
-
-    or
-
-        group
-            structure_tag
-              id	000000f9
-              attribute
-                ...
-            member_tag
-              id	000000fe
-              attribute
-                ...
-            member_tag
-              id	00000107
-              attribute
-                ...
-            null
-              id	00000110
-    """
-
-    special_tags = (
-        "unknown_tag",
-        "null",
-        "compile_unit",
-    )
-
-    single_tags = (
-        "base_tag",
-        "typedef_tag",
-        "pointer_tag",
-    )
-
-    member_tags = (
-        "subrange_tag",
-        "enumerator_tag",
-        "member_tag",
-    )
-
-    group_tags = {
-        "array_tag": ("subrange_tag",),
-        "enumeration_tag": ("enumerator_tag"),
-        "union_tag": ("member_tag", "group"),
-        "structure_tag": ("member_tag", "group"),
-    }
-
-    required_attributes = {
-        "base_tag": ("encoding", "byte_size"),
-        "typedef_tag": ("name", "type"),
-        "member_tag": (("data_member_location", "data_bit_offset"), "name", "type"),
-        "array_tag": ("type",),
-    }
-
-    def __init__(self, entry_tree: Tree, type_collector: Dict[int, CType]):
-        """
-        :ivar tag_type: type of tag entry, must be a member of special_tags,
-            single_tags, member_tags or group_tags
-        :ivar id: numeric identifier
-        :ivar attributes: tag entry attribute values
-        :ivar members: IDs of member tags, non-empty only for group_tag types
-        :param entry_tree: The lark tree corresponding to the tag
-        :param type_collector: A dictionary of ID to CType mappings of all the CTypes found in the parsed tree from
-        """
-
-        self.collector: Dict[int, CType] = type_collector
-        self._id: Optional[int] = None
-        self.attributes: Attributes = Attributes()
-        self.members: List[int] = list()
-        self.tag_type: str = entry_tree.data
-
-        tag_children = entry_tree.children
-        match self.tag_type:
-            case "compile_unit":
-                if len(tag_children) not in (1, 2):
-                    raise ValueError(
-                        f"Found a compile_unit tree with an invalid number of children '{len(tag_children)}' (expected 1 or 2), tree '{entry_tree.pretty()}'"
-                    )
-                for child in tag_children:
-                    if isinstance(child, Token):
-                        self.id = self.extract_id(child)
-                    elif child.data == "null":
-                        CType(child, type_collector)
-            case "group":
-                # TODO: Check if declaration
-                # if len(tag_children) < 2:
-                #     raise ValueError(
-                #         f"Found a group tree with an invalid number of children '{len(tag_children)}' (expected > 2), tree '{entry_tree.pretty()}'"
-                #     )
-                leader = CType(tag_children[0], type_collector)
-                for member in tag_children[1:-1]:
-                    member = CType(member, type_collector)
-                    if member.tag_type not in self.group_tags[leader.tag_type]:
-                        raise ValueError(
-                            f"Found an unexpected member tag '{member.tag_type}' in group tag '{leader.tag_type}' (expected '{self.group_tags[leader.tag_type]}'), tree '{entry_tree.pretty()}'"
-                        )
-                    if member.id:
-                        leader.members.append(member.id)
-                if len(tag_children) > 1:
-                    if CType(tag_children[-1], type_collector).tag_type != "null":
-                        raise ValueError(
-                            f"Found a group tree with non-null final child, tree '{entry_tree.pretty()}'"
-                        )
-            case tag if tag in (
-                *self.special_tags,
-                *self.single_tags,
-                *self.member_tags,
-                *self.group_tags,
-            ):
-                if len(tag_children) == 0:
-                    raise ValueError(
-                        f"Found a '{self.tag_type}' tree with no ID, tree '{entry_tree.pretty()}'"
-                    )
-                assert isinstance(tag_children[0], Token)
-                self.id = self.extract_id(tag_children[0])
-                for child in tag_children[1:]:
-                    self.attributes.extract_attribute(child)
-            case "structure_decl":
-                pass
-            case _:
-                raise ValueError(
-                    f"Found an unknown tag type: '{self.tag_type}', tree '{entry_tree.pretty()}'"
-                )
-
-        if self.tag_type in self.required_attributes:
-            for attribute in self.required_attributes[self.tag_type]:
-                if isinstance(attribute, tuple):
-                    for option in attribute:
-                        if getattr(self.attributes, option) is not None:
-                            break
-                    else:
-                        raise AttributeError(
-                            f"CType of type '{self.tag_type}' is missing a required attribute, options are '{attribute}', CType '{self}'"
-                        )
-                else:
-                    if getattr(self.attributes, attribute) is None:
-                        raise AttributeError(
-                            f"CType of type '{self.tag_type}' is missing required attribute '{attribute}', CType '{self}'"
-                        )
-
-    @property
-    def id(self):
-        return self._id
-
-    @id.setter
-    def id(self, new_id: int):
-        if self._id is not None:
-            raise AttributeError(
-                f"Attempted to reset initialised ID from '{self._id}' to '{new_id}', CType '{self}"
-            )
-        elif new_id in self.collector:
-            raise ValueError(
-                f"Attempted to reuse ID '{new_id}' from existing CType '{self.collector[new_id]}' for new CType '{self}'"
-            )
-        self._id = new_id
-        self.collector[new_id] = self
-
-    def base_type(self) -> CType:
-        """
-        Find the underlying base type of a CType.
-
-        Returns self for all CTypes with types not in "typedef_tag",
-        "member_tag" or "array_tag".
-        """
-        if self.tag_type not in ("typedef_tag", "member_tag", "array_tag"):
-            return self
-
-        if self.attributes.alignment is not None:
-            raise ValueError(
-                f"Requesting base type of CType '{self}' with non-zero alignment '{self,self.attributes.alignment}' (not supported)"
-            )
-
-        base_type = self.collector[self.attributes.type[0]]
-        while base_type.tag_type == "typedef_tag":
-            base_type = self.collector[base_type.attributes.type[0]]
-
-        if base_type.tag_type in (*self.special_tags, *self.member_tags):
-            raise ValueError(
-                f"CType '{self}' resolved to base type '{base_type}' of invalid tag type '{base_type.tag_type}'"
-            )
-        return base_type
-
-    def array_dimensions(self) -> Tuple[int, ...]:
-        """
-        Return the array's dimensions in DWARF/source order.
-
-        A dimension is 0 when its subrange does not have a known
-        bound. C arrays have an implicit lower bound of zero, so a
-        DW_AT_upper_bound of N describes N + 1 entries.
-        """
-        if self.tag_type != "array_tag":
-            raise TypeError(
-                f"Provided CType tag '{self.tag_type}' is not an 'array_tag'"
-            )
-
-        dimensions: List[int] = []
-        for member_id in self.members:
-            subrange_type = self.collector[member_id]
-            if subrange_type.attributes.count is not None:
-                dimensions.append(subrange_type.attributes.count)
-            elif subrange_type.attributes.upper_bound is not None:
-                dimensions.append(subrange_type.attributes.upper_bound + 1)
-            else:
-                dimensions.append(0)
-        return tuple(dimensions)
-
-    def array_count(self) -> int:
-        """
-        Find the number of entries in an "array_tag" CType. Returns 0 if the
-        subrange type does not have a count attribute.
-        """
-        dimensions = self.array_dimensions()
-        if not dimensions:
-            return 0
-
-        count = 1
-        for dimension in dimensions:
-            count *= dimension
-        return count
-
-    def __eq__(self, other: object):
-        if not isinstance(other, CType):
-            return False
-
-        c_type: CType = other
-
-        if (
-            self.tag_type != c_type.tag_type
-            or self.attributes != c_type.attributes
-            or len(self.members) != len(c_type.members)
-        ):
-            return False
-
-        match self.tag_type:
-            case "base_tag" | "pointer_tag":
-                pass
-            case "typedef_tag" | "member_tag":
-                return self.base_type() == c_type.base_type()
-            case "array_tag":
-                if self.array_dimensions() != c_type.array_dimensions():
-                    return False
-                return self.base_type() == c_type.base_type()
-            case "union_tag" | "structure_tag":
-                members = sorted(
-                    [self.collector[m] for m in self.members],
-                    key=lambda m: m.attributes.data_member_location,
-                )
-
-                c_type_members = sorted(
-                    [c_type.collector[m] for m in c_type.members],
-                    key=lambda m: m.attributes.data_member_location,
-                )
-
-                for o in range(len(members)):
-                    if members[o] != c_type_members[o]:
-                        return False
-            case _:
-                return False
-
-        return True
-
-    @staticmethod
-    def extract_id(id_token: Token):
-        """
-        Returns the numeric value from lark trees of the form:
-            id 0000423e
-        """
-        id_string = id_token.value.split(":")[0]
-        return int(id_string, base=16)
-
-    @staticmethod
-    def sanity_check_type_ids(all_types: Dict[int, CType]):
-        """
-        Given a complete dictionary of type IDs to CTypes, ensure all type ID
-        references are contained in the dictionary.
-        """
-        for new_type in all_types.values():
-            if new_type.tag_type in ("typedef_tag", "member_tag", "array_tag"):
-                if new_type.attributes.type[0] not in all_types:
-                    raise ValueError(
-                        f"Base type ID {new_type.attributes.type[0]} is not a valid type, CType '{new_type}'"
-                    )
-            if new_type.tag_type == "array_tag" and not new_type.members:
-                raise ValueError(
-                    f"Array type has no members, expected at least 1 subrange type, CType '{new_type}'"
-                )
-
-    @staticmethod
-    def find_type_by_name(all_types: Dict[int, CType], type_name: str) -> CType:
-        """
-        Given a type name, find the underlying base type.
-        """
-        type_match = None
-        for c_type in all_types.values():
-            if c_type.attributes.name == type_name:
-                if not type_match:
-                    type_match = c_type
-                    continue
-
-                if c_type != type_match:
-                    raise ValueError(
-                        f"Found multiple types with name '{type_name}': {type_match}"
-                    )
-        if not type_match:
-            raise ValueError(f"Could not find a type with name '{type_name}'")
-
-        return type_match.base_type()
-
-    def __repr__(self):
-        return f"CType:\n    ID: {self.id}\n    type: {self.tag_type}\n    members: {self.members}\n{self.attributes!r}"
+from .dwarf import CType, DwarfTypes
 
 
 class ConfigStruct:
@@ -685,8 +124,8 @@ BaseTypesMap: Dict[str, Dict[int, Any]] = {
 class ConfigStructResolver:
     """
     This class records all configuration structs of a system. As structs are
-    added to this class, their target files are dwarf dumped and parsed, and all
-    CTypes they contain are collected into a dictionary.
+    added to this class, the DWARF of their target files is opened for looking up
+    the types of the structs.
 
     Once all structs of the system are added, they are serialised one-by-one
     based on the memory layout of their types derived from the DWARF symbols in
@@ -700,28 +139,18 @@ class ConfigStructResolver:
         self,
         build_dir: pathlib.Path,
         endian="little",
-        dwarfdump_name: str = "llvm-dwarfdump",
     ):
         """
         :param build_dir: name of the build directory, used for emitting serialised
             structs
         :param endian: endianness of encoding
-        :param dwarfdump_name: name of dwarf dump command
         """
         if endian != "little":
             raise NotImplementedError("Big endian is not currently supported!")
 
         self.build_dir = build_dir
-        self.dwarfdump_name = dwarfdump_name
-        self.files: Dict[pathlib.Path, Dict[int, CType]] = dict()
+        self.files: Dict[pathlib.Path, DwarfTypes] = dict()
         self.config_structs: List[ConfigStruct] = []
-
-        try:
-            subprocess.run([self.dwarfdump_name, "--version"])
-        except FileNotFoundError as e:
-            raise RuntimeError(
-                f"No LLVM DwarfDump! Make sure {self.dwarfdump_name} is on your PATH"
-            ) from e
 
     def add_struct(self, s: ConfigStruct):
         """
@@ -751,53 +180,25 @@ class ConfigStructResolver:
         for s in lst:
             self.add_struct(s)
 
-    def resolve_target_file(self, target_file: pathlib.Path) -> Dict[int, CType]:
+    def resolve_target_file(self, target_file: pathlib.Path) -> DwarfTypes:
         """
-        Dwarf dump a target file, parse the output and collect all CTypes into a dictionary.
+        Open a target file's DWARF for looking up types.
         """
-        try:
-            output = subprocess.run(
-                [self.dwarfdump_name, target_file],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(
-                f"Failed to eat DWARF from {target_file}! Does file exist?"
-            ) from e
+        return DwarfTypes(target_file)
 
-        # Remove lines before first tag entry and add extra newline
-        raw_lines = output.stdout.splitlines()
-        for start in range(len(raw_lines)):
-            if raw_lines[start].startswith("0x00000000:"):
-                break
-        else:
-            raise RuntimeError(
-                "Could not find tag entry with ID 0 in DWARF dump output"
-            )
-
-        raw_output = "\n".join(raw_lines[start:]) + "\n\n"
-
-        try:
-            output_tree = Lark(
-                grammar,
-                parser="lalr",
-                propagate_positions=False,
-                maybe_placeholders=False,
-            ).parse(raw_output)
-        except Exception as e:
-            raise RuntimeError(
-                f"Could not parse DWARF dump output of {target_file}!"
-            ) from e
-
-        type_collector: Dict[int, CType] = dict()
-        for dwarf_entry in output_tree.children:
-            assert isinstance(dwarf_entry, Tree)
-            CType(dwarf_entry, type_collector)
-
-        CType.sanity_check_type_ids(type_collector)
-        return type_collector
+    def find_type(self, config_struct: ConfigStruct) -> CType:
+        """
+        Find the type into which `config_struct` is to be serialised: the type of the variable in
+        its section if there is one, and otherwise the type with its type name.
+        """
+        assert config_struct.target_file is not None
+        assert config_struct.type_name is not None
+        assert config_struct.section_name is not None
+        types = self.files[config_struct.target_file]
+        c_type = types.type_for_section(str(config_struct.section_name), config_struct.type_name)
+        if c_type is None:
+            c_type = types.type_by_name(config_struct.type_name)
+        return c_type
 
     def _flatten_and_write(self, user_value: Any, c_type: CType) -> bytearray:
         """
@@ -858,9 +259,16 @@ class ConfigStructResolver:
                 ctype_cls = BaseTypesMap[c_type.attributes.encoding][type_size]
 
                 if isinstance(user_value, str) or isinstance(user_value, bytes):
-                    if c_type.attributes.encoding in (
-                        "unsigned, signed, float, boolean"
-                    ):
+                    # Characters may be packed into char types, or into any single-byte integer
+                    # type (Rust's c_char is u8 or i8, which are not encoded as characters).
+                    is_char = c_type.attributes.encoding in (
+                        "unsigned_char",
+                        "signed_char",
+                    ) or (
+                        c_type.attributes.encoding in ("unsigned", "signed")
+                        and type_size == 1
+                    )
+                    if not is_char:
                         raise ValueError(
                             f"User provided string or bytes value '{user_value!r}' which cannot be used for C Base type '{ctype_cls.__name__}', CType '{c_type}'"
                         )
@@ -998,9 +406,7 @@ class ConfigStructResolver:
                     f"Top level config struct {config_struct} has no type name!"
                 )
 
-            c_type = CType.find_type_by_name(
-                self.files[config_struct.target_file], config_struct.type_name
-            )
+            c_type = self.find_type(config_struct)
             try:
                 blob = self._flatten_and_write(config_struct, c_type)
             except Exception as e:
